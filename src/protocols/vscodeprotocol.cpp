@@ -45,9 +45,9 @@ namespace
     const std::string LOG_EVENT("<- (E) ");
 
     // Make sure we continue add new commands into queue only after current command execution is finished.
-    // Note, configurationDone: prevent deadlock in _dup() call during std::getline() from stdin in main thread.
+    // Both initial configuration and later launches can redirect stdin, which must not race std::getline().
     const std::unordered_set<std::string> g_syncCommandExecutionSet{
-        "configurationDone", "disconnect", "terminate"};
+        "configurationDone", "launch", "disconnect", "terminate"};
     // Commands, that trigger command queue canceling routine.
     const std::unordered_set<std::string> g_cancelCommandQueueSet{
         "disconnect", "terminate", "continue", "next", "stepIn", "stepOut"};
@@ -413,6 +413,7 @@ void VSCodeProtocol::EmitExecEvent(PID pid, const std::string& argv0)
 
 static void AddCapabilitiesTo(json &capabilities)
 {
+    capabilities["concreteSessionReuseVersion"] = 1;
     capabilities["supportsConfigurationDoneRequest"] = true;
     capabilities["supportsFunctionBreakpoints"] = true;
     capabilities["supportsConditionalBreakpoints"] = true;

@@ -984,6 +984,18 @@ HRESULT ModulesSources::GetIndexBySourceFullPath(std::string fullPath, unsigned 
     return S_OK;
 }
 
+void ModulesSources::Clear()
+{
+    std::lock_guard<std::mutex> lock(m_sourcesInfoMutex);
+    m_sourceIndexToPath.clear();
+    m_sourcePathToIndex.clear();
+    m_sourceNameToFullPathsIndexes.clear();
+    m_sourcesMethodsData.clear();
+#ifdef WIN32
+    m_sourceIndexToInitialFullPath.clear();
+#endif
+}
+
 void ModulesSources::FindFileNames(Utility::string_view pattern, unsigned limit, std::function<void(const char *)> cb)
 {
 #ifdef WIN32

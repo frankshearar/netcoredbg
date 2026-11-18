@@ -109,7 +109,16 @@ protected:
     std::string m_clrPath;
     dbgshim_t m_dbgshim;
 
-    IORedirectHelper m_ioredirect;
+    // ProcessStdin can retain a retired helper until cancellation completes.
+    std::shared_ptr<IORedirectHelper> m_ioredirect;
+
+    std::shared_ptr<IORedirectHelper> IORedirect()
+    {
+        return std::atomic_load(&m_ioredirect);
+    }
+
+    std::shared_ptr<IORedirectHelper> CreateIORedirect();
+    void ResetIORedirect();
 
     HRESULT CheckDebugProcess();
     bool HaveDebugProcess();

@@ -87,23 +87,23 @@ template <> struct IOSystemTraits<Win32PlatformTag>
         StdIOSwap(const StdFiles &);
         ~StdIOSwap();
 
-        StdIOSwap(StdIOSwap&& other)
+        StdIOSwap(StdIOSwap&& other) : m_count(other.m_count)
         {
-            m_valid = other.m_valid;
-            if (!m_valid)
-                return;
-
-            other.m_valid = false;
-            for (unsigned n = 0; n < std::tuple_size<StdFiles>::value; n++)
+            other.m_count = 0;
+            for (unsigned n = 0; n < m_count; n++)
             {
                 m_orig_handle[n] = other.m_orig_handle[n];
                 m_orig_fd[n] = other.m_orig_fd[n];
+                m_orig_handle_is_crt[n] = other.m_orig_handle_is_crt[n];
             }
         }
 
-        bool m_valid;
+    private:
+        void Restore();
+        unsigned m_count;
         HANDLE m_orig_handle[std::tuple_size<StdFiles>::value];
         int m_orig_fd[std::tuple_size<StdFiles>::value];
+        bool m_orig_handle_is_crt[std::tuple_size<StdFiles>::value];
     };
 };
 

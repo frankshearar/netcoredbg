@@ -183,7 +183,7 @@ HRESULT STDMETHODCALLTYPE ManagedCallback::CreateProcess(ICorDebugProcess *pProc
         m_debugger.pProtocol->EmitExitedEvent(ExitedEvent(GetWaitpid().GetExitCode()));
         m_debugger.NotifyProcessExited();
         m_debugger.pProtocol->EmitTerminatedEvent();
-        m_debugger.m_ioredirect.async_cancel();
+        m_debugger.IORedirect()->async_cancel();
     };
     if (m_debugger.m_interopDebugging &&
         FAILED(m_debugger.m_sharedInteropDebugger->Init((pid_t)m_debugger.m_processId, m_sharedCallbacksQueue, attach, NotifyLastThreadExited, error_n)))
@@ -221,6 +221,7 @@ HRESULT STDMETHODCALLTYPE ManagedCallback::CreateProcess(ICorDebugProcess *pProc
 HRESULT STDMETHODCALLTYPE ManagedCallback::ExitProcess(ICorDebugProcess *pProcess)
 {
     LogFuncEntry();
+    auto ioredirect = m_debugger.IORedirect();
 
     if (m_debugger.m_sharedEvalWaiter->IsEvalRunning())
         LOGW("The target process exited while evaluating the function.");
@@ -248,7 +249,7 @@ HRESULT STDMETHODCALLTYPE ManagedCallback::ExitProcess(ICorDebugProcess *pProces
     m_debugger.pProtocol->EmitExitedEvent(ExitedEvent(exitCode));
     m_debugger.NotifyProcessExited();
     m_debugger.pProtocol->EmitTerminatedEvent();
-    m_debugger.m_ioredirect.async_cancel();
+    ioredirect->async_cancel();
     return S_OK;
 }
 

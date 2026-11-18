@@ -333,9 +333,10 @@ Class::AsyncHandle Class::async_read(const FileHandle& fh, void *buf, size_t cou
     result.handle = fh.handle;
     result.overlapped.reset(new OVERLAPPED);
     memset(result.overlapped.get(), 0, sizeof(OVERLAPPED));
-    result.overlapped->hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
-    if (result.overlapped->hEvent == INVALID_HANDLE_VALUE)
+    std::unique_ptr<void, decltype(&CloseHandle)> event(CreateEvent(NULL, FALSE, FALSE, NULL), CloseHandle);
+    if (!event)
         return {};
+    result.overlapped->hEvent = event.get();
 
     DWORD val;
     DWORD bytesRead;
@@ -360,6 +361,7 @@ Class::AsyncHandle Class::async_read(const FileHandle& fh, void *buf, size_t cou
         {
             // nothing to read from the console -- defer call to ReadFile
             result.buf = buf, result.count = count;
+            event.release();
             return result;
         }
     }
@@ -370,6 +372,7 @@ Class::AsyncHandle Class::async_read(const FileHandle& fh, void *buf, size_t cou
             return {};
     }
 
+    event.release();
     return result;
 }
 
@@ -382,9 +385,10 @@ Class::AsyncHandle Class::async_write(const FileHandle& fh, const void *buf, siz
     result.handle = fh.handle;
     result.overlapped.reset(new OVERLAPPED);
     memset(result.overlapped.get(), 0, sizeof(OVERLAPPED));
-    result.overlapped->hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
-    if (result.overlapped->hEvent == INVALID_HANDLE_VALUE)
+    std::unique_ptr<void, decltype(&CloseHandle)> event(CreateEvent(NULL, FALSE, FALSE, NULL), CloseHandle);
+    if (!event)
         return {};
+    result.overlapped->hEvent = event.get();
 
     if (! WriteFile(fh.handle, buf, (DWORD)count, nullptr, result.overlapped.get()))
     {
@@ -392,6 +396,7 @@ Class::AsyncHandle Class::async_write(const FileHandle& fh, const void *buf, siz
             return {};
     }
 
+    event.release();
     return result;
 }
 
@@ -432,21 +437,23 @@ Class::IOResult Class::async_cancel(AsyncHandle& h)
     if (!h)
         return {IOResult::Error};
     
-    if (!CloseHandle(h.overlapped->hEvent))
-        perror("CloseHandle(event) error");
-
-    // console workaround -- canceling deferred operation
-    if (h.buf)
+    IOResult result = {IOResult::Success};
+    // A deferred console read has not submitted an overlapped operation.
+    if (!h.buf)
     {
-        h = AsyncHandle();
-        return {IOResult::Success};
+        if (!CancelIoEx(h.handle, h.overlapped.get()) && GetLastError() != ERROR_NOT_FOUND)
+            result = {IOResult::Error};
+
+        // Cancellation is only a request. Keep the event and OVERLAPPED alive
+        // until the kernel has finished accessing both.
+        DWORD bytes = 0;
+        if (!GetOverlappedResult(h.handle, h.overlapped.get(), &bytes, TRUE) &&
+            GetLastError() != ERROR_OPERATION_ABORTED)
+            result = {IOResult::Error};
     }
 
-    IOResult result;
-    if (!CancelIoEx(h.handle, h.overlapped.get()))
-        result = {IOResult::Error};
-    else 
-        result = {IOResult::Success};
+    if (!CloseHandle(h.overlapped->hEvent))
+        perror("CloseHandle(event) error");
 
     h = AsyncHandle();
     return result;
@@ -545,7 +552,7 @@ Class::IOSystem::StdFiles Class::get_std_files()
 
 // StdIOSwap class allows to substitute set of standard IO files with one provided to constructor.
 // Substitution exists only during life time of StsIOSwap instance.
-Class::StdIOSwap::StdIOSwap(const StdFiles& files) : m_valid(true)
+Class::StdIOSwap::StdIOSwap(const StdFiles& files) : m_count(0)
 {
     const static unsigned NFD = std::tuple_size<StdFiles>::value;
     static const DWORD std_handles[NFD] = {STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
@@ -566,6 +573,8 @@ Class::StdIOSwap::StdIOSwap(const StdFiles& files) : m_valid(true)
             throw std::runtime_error("can't use socket handle for stdin/stdout/stderr");
     }
 
+    auto restore = [this](void *) { Restore(); };
+    std::unique_ptr<void, decltype(restore)> rollback(this, restore);
     for (unsigned n = 0; n < NFD; n++)
     {
         m_orig_handle[n] = GetStdHandle(std_handles[n]);
@@ -576,35 +585,46 @@ Class::StdIOSwap::StdIOSwap(const StdFiles& files) : m_valid(true)
             throw std::runtime_error(msg);
         }
 
-        if (!SetHandleInformation(new_handles[n].handle, HANDLE_FLAG_INHERIT, 1))
-            fprintf(stderr, "SetHandleInformation failed!\n");
-
-        if (!SetStdHandle(std_handles[n], new_handles[n].handle))
-        {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "SetStdHandle(%#x, %p): error", std_handles[n], new_handles[n].handle);
-            throw std::runtime_error(msg);
-        } 
-
-
-        int fd = _open_osfhandle(reinterpret_cast<intptr_t>(new_handles[n].handle), open_flags[n]); 
-        if (fd == -1)
-            throw Win32Exception("_open_osfhandle");
-
+        m_orig_handle_is_crt[n] =
+            m_orig_handle[n] == reinterpret_cast<HANDLE>(_get_osfhandle(open_fds[n]));
         m_orig_fd[n] = _dup(open_fds[n]);
         if (m_orig_fd[n] == -1)
             throw Win32Exception("_dup");
+        ++m_count;
+
+        // The CRT takes ownership; the caller retains ownership of its pipe handle.
+        HANDLE crtHandle;
+        if (!DuplicateHandle(GetCurrentProcess(), new_handles[n].handle, GetCurrentProcess(),
+                             &crtHandle, 0, TRUE, DUPLICATE_SAME_ACCESS))
+            throw Win32Exception("DuplicateHandle");
+        std::unique_ptr<void, decltype(&CloseHandle)> ownership(crtHandle, CloseHandle);
+
+        int fd = _open_osfhandle(reinterpret_cast<intptr_t>(crtHandle), open_flags[n]);
+        if (fd == -1)
+            throw Win32Exception("_open_osfhandle");
+        ownership.release();
+        auto close_fd = [](int *descriptor) { _close(*descriptor); };
+        std::unique_ptr<int, decltype(close_fd)> descriptor(&fd, close_fd);
 
         if (_dup2(fd, open_fds[n]) == -1)
             throw Win32Exception("_dup2");
 
-        close(fd);
+        if (!SetHandleInformation(new_handles[n].handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT))
+            throw Win32Exception("SetHandleInformation");
+        if (!SetStdHandle(std_handles[n], new_handles[n].handle))
+            throw Win32Exception("SetStdHandle");
     }
+    rollback.release();
 }
 
 Class::StdIOSwap::~StdIOSwap()
 {
-    if (!m_valid)
+    Restore();
+}
+
+void Class::StdIOSwap::Restore()
+{
+    if (!m_count)
         return;
 
     const static unsigned NFD = std::tuple_size<StdFiles>::value;
@@ -614,16 +634,22 @@ Class::StdIOSwap::~StdIOSwap()
     fflush(stdout);
     fflush(stderr);
 
-    for (unsigned n = 0; n < NFD; n++)
+    for (unsigned n = 0; n < m_count; n++)
     {
-        if (!SetStdHandle(std_handles[n], m_orig_handle[n]))
+        if (_dup2(m_orig_fd[n], open_fds[n]) == -1)
+            abort();
+
+        // _dup2 closes the old CRT handle; an aliased Win32 standard handle must follow it.
+        HANDLE restored = m_orig_handle_is_crt[n] ?
+            reinterpret_cast<HANDLE>(_get_osfhandle(open_fds[n])) : m_orig_handle[n];
+        if (!SetStdHandle(std_handles[n], restored))
         {
             abort();
         }
 
-        _dup2(m_orig_fd[n], open_fds[n]);
-        close(m_orig_fd[n]);
+        _close(m_orig_fd[n]);
     }
+    m_count = 0;
 }
 
 #endif  // WIN32

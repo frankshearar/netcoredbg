@@ -181,6 +181,8 @@ public:
 
     void FindFileNames(Utility::string_view pattern, unsigned limit, std::function<void(const char *)> cb);
 
+    void Clear();
+
 private:
 
     struct FileMethodsData

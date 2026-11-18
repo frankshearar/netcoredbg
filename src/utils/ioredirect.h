@@ -57,6 +57,8 @@ public:
 
     ~IORedirectHelper();
 
+    void finish();
+
     /// This function allows to write some data to pipe, which represents stdin stream.
     /// Output IS NOT BLOCKING, function returns actual number of written bytes
     /// (this number might be less than requested if output buffer is full).
@@ -72,28 +74,24 @@ public:
     /// process, which inherits stdin/stdout/stderr files which is substituted during
     /// function invocation. Arguments `args...` just forwared to function `func`.
     ///
-    /// Note: this function closes files, so it can be called only once!
+    /// Child-side pipe ends close after invocation, including on failure.
+    /// Each helper supports only one invocation.
     ///
     template <typename Func, typename... Args>
     typename std::result_of<Func(Args...)>::type exec(Func func, Args&&... args)
     {
+        auto close_pipes = [this](void *) { close_child_pipes(); };
+        std::unique_ptr<void, decltype(close_pipes)> cleanup(this, close_pipes);
         IOSystem::StdIOSwap file_descriptors({
             std::get<IOSystem::Stdin>(m_pipes),
             std::get<IOSystem::Stdout>(m_pipes),
             std::get<IOSystem::Stderr>(m_pipes)});
 
-        // close "remote" pipe ends
-        auto on_exit = [&](void *) {
-            IOSystem::close(std::get<IOSystem::Stdin>(m_pipes));
-            IOSystem::close(std::get<IOSystem::Stdout>(m_pipes));
-            IOSystem::close(std::get<IOSystem::Stderr>(m_pipes));
-        };
-
-        std::unique_ptr<void, decltype(on_exit)> defer{this, on_exit};
         return func(std::forward<Args>(args)...);
     }
 
 private:
+    void close_child_pipes();
     void wake_worker();
     void wake_reader();
 
@@ -103,7 +101,7 @@ private:
     bool ProcessFinishedReadRequests(InStreamBuf* const in_streams[], size_t stream_types_cout, IOSystem::AsyncHandle async_handles[]);
 
     // remote side of the pipes
-    const std::tuple<IOSystem::FileHandle, IOSystem::FileHandle, IOSystem::FileHandle> m_pipes;
+    std::tuple<IOSystem::FileHandle, IOSystem::FileHandle, IOSystem::FileHandle> m_pipes;
 
     // our side of the pipes
     std::tuple<OutStream, InStream, InStream> m_streams;
@@ -125,7 +123,7 @@ private:
     PipePair m_input_pipe;  // pipe to wake thread sleeping in async_input
     
     std::atomic<bool> m_cancel;  // atomic flag which prevents multiple calls to async_cancel()
-    volatile bool     m_finish;  // exit request for worker thread
+    std::atomic<bool> m_finish;  // exit request for worker thread
 
     std::thread   m_thread;     // worker threead (which monitors received data)
 };

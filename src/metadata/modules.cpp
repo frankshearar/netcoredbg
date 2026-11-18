@@ -181,6 +181,7 @@ void Modules::CleanupAllModules()
     std::lock_guard<std::mutex> lock(m_modulesInfoMutex);
     m_modulesInfo.clear();
     m_modulesAppUpdate.Clear();
+    m_modulesSources.Clear();
 }
 
 std::string GetModuleFileName(ICorDebugModule *pModule)

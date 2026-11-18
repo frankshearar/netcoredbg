@@ -336,3 +336,77 @@ TEST_CASE("IOSystem::select_socket")
     //check_select(socket_pair());
 }
 
+#ifdef WIN32
+TEST_CASE("IOSystem::repeated stdio swaps preserve ownership")
+{
+    DWORD before = 0, after = 0;
+    REQUIRE(GetProcessHandleCount(GetCurrentProcess(), &before));
+    for (unsigned attempt = 0; attempt < 16; ++attempt)
+    {
+        std::pair<IOSystem::FileHandle, IOSystem::FileHandle> pipes[] {
+            IOSystem::unnamed_pipe(), IOSystem::unnamed_pipe(), IOSystem::unnamed_pipe()
+        };
+        {
+            IOSystem::StdIOSwap swap({pipes[0].first, pipes[1].second, pipes[2].second});
+        }
+        for (auto pipe : pipes)
+        {
+            CHECK(IOSystem::close(pipe.first).status == IOSystem::IOResult::Success);
+            CHECK(IOSystem::close(pipe.second).status == IOSystem::IOResult::Success);
+        }
+    }
+    REQUIRE(GetProcessHandleCount(GetCurrentProcess(), &after));
+    CHECK(after == before);
+}
+
+TEST_CASE("IOSystem::failed asynchronous pipe operations release their events")
+{
+    DWORD before = 0, after = 0;
+    REQUIRE(GetProcessHandleCount(GetCurrentProcess(), &before));
+    for (unsigned attempt = 0; attempt < 32; ++attempt)
+    {
+        auto pipe = IOSystem::unnamed_pipe();
+        char buffer;
+        IOSystem::close(pipe.second);
+        auto read = IOSystem::async_read(pipe.first, &buffer, 1);
+        CHECK_FALSE(read);
+        IOSystem::close(pipe.first);
+
+        pipe = IOSystem::unnamed_pipe();
+        IOSystem::close(pipe.first);
+        auto write = IOSystem::async_write(pipe.second, "", 1);
+        CHECK_FALSE(write);
+        IOSystem::close(pipe.second);
+    }
+    REQUIRE(GetProcessHandleCount(GetCurrentProcess(), &after));
+    CHECK(after == before);
+}
+
+TEST_CASE("IOSystem::failed stdio swap restores its streams")
+{
+    std::pair<IOSystem::FileHandle, IOSystem::FileHandle> pipes[] {
+        IOSystem::unnamed_pipe(), IOSystem::unnamed_pipe()
+    };
+    auto fail = [&] {
+        REQUIRE_THROWS_AS(IOSystem::StdIOSwap({
+            pipes[0].first, pipes[1].second,
+            IOSystem::FileHandle(reinterpret_cast<HANDLE>(static_cast<intptr_t>(0x12345678)))
+        }), std::runtime_error);
+    };
+    fail();
+    DWORD before = 0, after = 0;
+    REQUIRE(GetProcessHandleCount(GetCurrentProcess(), &before));
+    for (unsigned attempt = 0; attempt < 16; ++attempt)
+        fail();
+    CHECK(GetFileType(GetStdHandle(STD_INPUT_HANDLE)) != FILE_TYPE_UNKNOWN);
+    CHECK(GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) != FILE_TYPE_UNKNOWN);
+    CHECK(GetFileType(GetStdHandle(STD_ERROR_HANDLE)) != FILE_TYPE_UNKNOWN);
+    REQUIRE(GetProcessHandleCount(GetCurrentProcess(), &after));
+    CHECK(after == before);
+    for (auto pipe : pipes)
+    {
+        CHECK(IOSystem::close(pipe.first).status == IOSystem::IOResult::Success);
+        CHECK(IOSystem::close(pipe.second).status == IOSystem::IOResult::Success);
+    }
+}
+#endif

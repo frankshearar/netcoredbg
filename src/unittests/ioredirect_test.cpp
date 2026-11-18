@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <string>
+#include <chrono>
+#include <future>
 
 #include "utils/span.h"
 #include "utils/iosystem.h"
@@ -33,6 +35,77 @@ TEST_CASE("IORedirect::create")
         { IOSystem::unnamed_pipe(), IOSystem::unnamed_pipe(), IOSystem::unnamed_pipe() },
         callback );
 }
+
+TEST_CASE("IORedirect::exec releases child pipe ends")
+{
+    IORedirectHelper::Pipes pipes {
+        IOSystem::unnamed_pipe(), IOSystem::unnamed_pipe(), IOSystem::unnamed_pipe()
+    };
+    IORedirectHelper ior(pipes, [](IORedirectHelper::StreamType, span<char>) {});
+
+    char buffer;
+    auto read = IOSystem::async_read(std::get<IOSystem::Stdout>(pipes).first, &buffer, 1);
+    REQUIRE(read);
+    SECTION("successful invocation") { ior.exec([] {}); }
+    SECTION("failed invocation")
+    {
+        CHECK_THROWS_AS(ior.exec([] { throw std::runtime_error("launch failed"); }), std::runtime_error);
+    }
+
+    bool completed = IOSystem::async_wait(&read, &read + 1, std::chrono::milliseconds(500));
+    if (completed)
+        IOSystem::async_result(read);
+    else
+        IOSystem::async_cancel(read);
+    CHECK(completed);
+}
+
+TEST_CASE("IORedirect::finish releases a retained input reader")
+{
+    auto input = IOSystem::unnamed_pipe();
+    InStream stream{InStreamBuf(input.first)};
+    auto ior = std::make_shared<IORedirectHelper>(
+        IORedirectHelper::Pipes{IOSystem::unnamed_pipe(), IOSystem::unnamed_pipe(), IOSystem::unnamed_pipe()},
+        [](IORedirectHelper::StreamType, span<char>) {});
+    std::promise<IORedirectHelper::AsyncResult> completion;
+    auto result = completion.get_future();
+    std::thread reader([ior, &stream, &completion] {
+        completion.set_value(ior->async_input(stream));
+    });
+    ior->finish();
+    ior.reset();
+    bool cancelled = result.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    if (!cancelled)
+        IOSystem::close(input.second);
+    reader.join();
+    if (cancelled)
+        IOSystem::close(input.second);
+    CHECK(cancelled);
+    CHECK(result.get() == IORedirectHelper::AsyncResult::Canceled);
+}
+
+#ifdef WIN32
+TEST_CASE("IORedirect::repeated sessions release their handles")
+{
+    bool launch = false;
+    SECTION("unused helper") {}
+    SECTION("launched helper") { launch = true; }
+    DWORD before = 0, after = 0;
+    REQUIRE(GetProcessHandleCount(GetCurrentProcess(), &before));
+    for (unsigned session = 0; session < 16; ++session)
+    {
+        IORedirectHelper ior(
+            { IOSystem::unnamed_pipe(), IOSystem::unnamed_pipe(), IOSystem::unnamed_pipe() },
+            [](IORedirectHelper::StreamType, span<char>) {});
+        if (launch)
+            ior.exec([] {});
+        ior.finish();
+        ior.finish();
+    }
+    REQUIRE(GetProcessHandleCount(GetCurrentProcess(), &after));
+    CHECK(after == before);
+}
+#endif
 
 #if 0  // IORedirect::output function should be changed on async_input().
 TEST_CASE("IORedirect::basic")

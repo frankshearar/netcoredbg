@@ -85,8 +85,37 @@ IORedirectHelper::IORedirectHelper(
 
 IORedirectHelper::~IORedirectHelper()
 {
+    finish();
+    close_child_pipes();
+    IOSystem::close(m_worker_pipe.first);
+    IOSystem::close(m_worker_pipe.second);
+    IOSystem::close(m_input_pipe.first);
+    IOSystem::close(m_input_pipe.second);
+}
+
+void IORedirectHelper::close_child_pipes()
+{
+    IOSystem::FileHandle *pipes[] = {
+        &std::get<IOSystem::Stdin>(m_pipes),
+        &std::get<IOSystem::Stdout>(m_pipes),
+        &std::get<IOSystem::Stderr>(m_pipes)
+    };
+    for (auto pipe : pipes)
+    {
+        if (*pipe)
+            IOSystem::close(*pipe);
+        *pipe = IOSystem::FileHandle();
+    }
+}
+
+void IORedirectHelper::finish()
+{
+    if (!m_thread.joinable())
+        return;
+
+    async_cancel();
     LOGD("request worker to exit");
-    m_finish = true;  // signal worker thread to stop
+    m_finish = true;
     wake_worker();
     m_thread.join();
 }

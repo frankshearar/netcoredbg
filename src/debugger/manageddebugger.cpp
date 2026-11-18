@@ -210,10 +210,7 @@ ManagedDebuggerBase::ManagedDebuggerBase(IProtocol *pProtocol_) :
     m_interopDebugging(false),
     m_unregisterToken(nullptr),
     m_processId(0),
-    m_ioredirect(
-        { IOSystem::unnamed_pipe(), IOSystem::unnamed_pipe(), IOSystem::unnamed_pipe() },
-        std::bind(&ManagedDebugger::InputCallback, this, std::placeholders::_1, std::placeholders::_2)
-    )
+    m_ioredirect(CreateIORedirect())
 {
     m_sharedEvalStackMachine->SetupEval(m_sharedEvaluator, m_sharedEvalHelpers, m_sharedEvalWaiter);
     m_sharedThreads->SetEvaluator(m_sharedEvaluator);
@@ -226,6 +223,13 @@ ManagedDebuggerBase::ManagedDebuggerBase(IProtocol *pProtocol_) :
 ManagedDebuggerHelpers::ManagedDebuggerHelpers(IProtocol *pProtocol_) :
     ManagedDebuggerBase(pProtocol_)
 {}
+
+std::shared_ptr<IORedirectHelper> ManagedDebuggerBase::CreateIORedirect()
+{
+    return std::make_shared<IORedirectHelper>(
+        IORedirectHelper::Pipes{IOSystem::unnamed_pipe(), IOSystem::unnamed_pipe(), IOSystem::unnamed_pipe()},
+        std::bind(&ManagedDebuggerBase::InputCallback, this, std::placeholders::_1, std::placeholders::_2));
+}
 
 ManagedDebugger::ManagedDebugger(IProtocol *pProtocol_) :
     ManagedDebuggerHelpers(pProtocol_)
@@ -349,7 +353,6 @@ HRESULT ManagedDebugger::Disconnect(DisconnectAction action)
         if (SUCCEEDED(Status))
             pProtocol->EmitTerminatedEvent();
 
-        m_ioredirect.async_cancel();
         return Status;
     }
 
@@ -736,7 +739,7 @@ HRESULT ManagedDebuggerHelpers::RunProcess(const std::string& fileExec, const st
             m_cwd.clear();
     }
 
-    Status = m_ioredirect.exec([&]() -> HRESULT {
+    Status = IORedirect()->exec([&]() -> HRESULT {
             IfFailRet(m_dbgshim.CreateProcessForLaunch(reinterpret_cast<LPWSTR>(const_cast<WCHAR*>(to_utf16(ss.str()).c_str())),
                                      /* Suspend process */ TRUE,
                                      outEnv.empty() ? NULL : &outEnv[0],
@@ -746,7 +749,10 @@ HRESULT ManagedDebuggerHelpers::RunProcess(const std::string& fileExec, const st
         });
 
     if (FAILED(Status))
+    {
+        ResetIORedirect();
         return Status;
+    }
 
 #ifdef FEATURE_PAL
     GetWaitpid().SetupTrackingPID(m_processId);
@@ -769,7 +775,7 @@ HRESULT ManagedDebuggerHelpers::RunProcess(const std::string& fileExec, const st
 
 HRESULT ManagedDebuggerBase::CheckNoProcess()
 {
-    std::lock_guard<Utility::RWLock::Reader> guardProcessRWLock(m_debugProcessRWLock.reader);
+    std::unique_lock<Utility::RWLock::Reader> guardProcessRWLock(m_debugProcessRWLock.reader);
 
     if (!m_iCorProcess)
         return S_OK;
@@ -779,6 +785,7 @@ HRESULT ManagedDebuggerBase::CheckNoProcess()
         return E_FAIL; // Already attached
     lockAttachedMutex.unlock();
 
+    guardProcessRWLock.unlock();
     Cleanup();
     return S_OK;
 }
@@ -855,20 +862,30 @@ void ManagedDebuggerBase::Cleanup()
     assert((m_iCorProcess && m_iCorDebug && m_uniqueManagedCallback && m_sharedCallbacksQueue) ||
            (!m_iCorProcess && !m_iCorDebug && !m_uniqueManagedCallback && !m_sharedCallbacksQueue));
 
-    if (!m_iCorProcess)
-        return;
-
-    m_iCorProcess.Free();
-
-    m_iCorDebug->Terminate();
-    m_iCorDebug.Free();
-
-    if (m_uniqueManagedCallback->GetRefCount() > 0)
+    if (m_iCorProcess)
     {
-        LOGW("ManagedCallback was not properly released by ICorDebug");
+        m_sharedBreakpoints->DeleteAllManaged();
+        m_uniqueSteppers.reset(new Steppers(m_sharedModules, m_sharedEvalHelpers));
+        m_iCorProcess.Free();
+
+        m_iCorDebug->Terminate();
+        m_iCorDebug.Free();
+
+        if (m_uniqueManagedCallback->GetRefCount() > 0)
+        {
+            LOGW("ManagedCallback was not properly released by ICorDebug");
+        }
+        m_uniqueManagedCallback.reset(nullptr);
+        m_sharedCallbacksQueue = nullptr;
     }
-    m_uniqueManagedCallback.reset(nullptr);
-    m_sharedCallbacksQueue = nullptr;
+
+    ResetIORedirect();
+}
+
+void ManagedDebuggerBase::ResetIORedirect()
+{
+    auto retired = std::atomic_exchange(&m_ioredirect, CreateIORedirect());
+    retired->finish();
 }
 
 HRESULT ManagedDebuggerHelpers::AttachToProcess()
@@ -1557,7 +1574,7 @@ void ManagedDebugger::FreeUnmanaged(PVOID mem)
 IDebugger::AsyncResult ManagedDebugger::ProcessStdin(InStream& stream)
 {
     LogFuncEntry();
-    return m_ioredirect.async_input(stream);
+    return IORedirect()->async_input(stream);
 }
 
 

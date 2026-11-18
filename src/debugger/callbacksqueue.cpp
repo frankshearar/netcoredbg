@@ -67,7 +67,7 @@ bool CallbacksQueue::CallbacksWorkerBreakpoint(ICorDebugAppDomain *pAppDomain, I
         m_debugger.pProtocol->EmitBreakpointEvent(changeEvent);
     }
     m_debugger.pProtocol->EmitStoppedEvent(event);
-    m_debugger.m_ioredirect.async_cancel();
+    m_debugger.IORedirect()->async_cancel();
     return true;
 }
 
@@ -94,7 +94,7 @@ bool CallbacksQueue::CallbacksWorkerStepComplete(ICorDebugAppDomain *pAppDomain,
 
     m_debugger.SetLastStoppedThread(pThread);
     m_debugger.pProtocol->EmitStoppedEvent(event);
-    m_debugger.m_ioredirect.async_cancel();
+    m_debugger.IORedirect()->async_cancel();
     return true;
 }
 
@@ -124,7 +124,7 @@ bool CallbacksQueue::CallbacksWorkerBreak(ICorDebugAppDomain *pAppDomain, ICorDe
     StoppedEvent event(StopPause, threadId);
     event.frame = stackFrame;
     m_debugger.pProtocol->EmitStoppedEvent(event);
-    m_debugger.m_ioredirect.async_cancel();
+    m_debugger.IORedirect()->async_cancel();
     return true;
 }
 
@@ -152,7 +152,7 @@ bool CallbacksQueue::CallbacksWorkerException(ICorDebugAppDomain *pAppDomain, IC
 
     m_debugger.SetLastStoppedThread(pThread);
     m_debugger.pProtocol->EmitStoppedEvent(event);
-    m_debugger.m_ioredirect.async_cancel();
+    m_debugger.IORedirect()->async_cancel();
     return true;
 }
 
@@ -409,7 +409,7 @@ HRESULT CallbacksQueue::Pause(ICorDebugProcess *pProcess, ThreadId lastStoppedTh
             // VSCode protocol event must provide thread only (VSCode count on this), even if this thread don't have user code.
             m_debugger.SetLastStoppedThreadId(lastStoppedThread);
             m_debugger.pProtocol->EmitStoppedEvent(StoppedEvent(StopPause, lastStoppedThread));
-            m_debugger.m_ioredirect.async_cancel();
+            m_debugger.IORedirect()->async_cancel();
             return S_OK;
         }
     }
@@ -438,7 +438,7 @@ HRESULT CallbacksQueue::Pause(ICorDebugProcess *pProcess, ThreadId lastStoppedTh
             event.frame = stackFrames[0];
         }
         m_debugger.pProtocol->EmitStoppedEvent(event);
-        m_debugger.m_ioredirect.async_cancel();
+        m_debugger.IORedirect()->async_cancel();
         return S_OK;
     }
     else
@@ -476,7 +476,7 @@ HRESULT CallbacksQueue::Pause(ICorDebugProcess *pProcess, ThreadId lastStoppedTh
                 event.frame = stackFrame;
                 m_debugger.SetLastStoppedThreadId(thread.id);
                 m_debugger.pProtocol->EmitStoppedEvent(event);
-                m_debugger.m_ioredirect.async_cancel();
+                m_debugger.IORedirect()->async_cancel();
                 return S_OK;
             }
         }
@@ -533,7 +533,7 @@ bool CallbacksQueue::CallbacksWorkerInteropBreakpoint(pid_t pid, std::uintptr_t 
     }
 
     m_debugger.pProtocol->EmitStoppedEvent(event);
-    m_debugger.m_ioredirect.async_cancel();
+    m_debugger.IORedirect()->async_cancel();
     return true;
 }
 
@@ -560,7 +560,7 @@ bool CallbacksQueue::CallbacksWorkerInteropSignal(pid_t pid, std::uintptr_t brea
 
     event.signal_name = signal;
     m_debugger.pProtocol->EmitStoppedEvent(event);
-    m_debugger.m_ioredirect.async_cancel();
+    m_debugger.IORedirect()->async_cancel();
     return true;
 }
 
